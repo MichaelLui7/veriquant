@@ -1,0 +1,12 @@
+# Risk / matching configuration (loaded by core_engine.config.load_risk_config).
+initial_capital: 1000000.0
+max_leverage: 2.0
+risk_free: 0.0
+
+# Vectorized path: per-unit-turnover transaction cost (basis points).
+cost_bps: 1.0
+
+# Verified (event-driven) path: matching engine parameters.
+slippage_bps: 1.0
+fee_bps: 1.0
+limit_pct: 0.0

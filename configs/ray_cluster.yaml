@@ -1,0 +1,4 @@
+# Ray local-cluster configuration.
+num_cpus: 4
+# Object store fraction of system memory (used by Ray's Plasma store).
+object_store_memory_fraction: 0.3

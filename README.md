@@ -41,7 +41,7 @@ result["rejections"]   # 被 Dafny 验证网关 / 涨跌停拦截的订单数
 
 ---
 
-## ✨ 三大核心技术壁垒
+## ✨ 核心 ：
 
 ### 1. Dafny 形式化验证风控内核（0 运行时违约）
 在 `dafny_verification/src/` 中基于**定点数算术（`SCALE = 10,000`）**严格证明了 45 个验证条件（VC），规避 IEEE-754 浮点数精度漂移（详见 [`dafny_verification/README.md`](dafny_verification/README.md) 与 [`docs/formal_verification_spec.md`](docs/formal_verification_spec.md)）：
@@ -53,7 +53,7 @@ result["rejections"]   # 被 Dafny 验证网关 / 涨跌停拦截的订单数
 | `StopLossBounds.dfy`    | **有界滑点止损定理**：在显式前置条件 `\|ΔPrice\| ≤ MaxGap` 下，严格界定多头最大止损边界       |       2        | ✅ Verified |
 | `RiskGateway.dfy`       | **原子事前风控网关（`PreTradeGateway`）** + 完整订单生命周期端到端守恒 + `{:test}` 断言       |       38       | ✅ Verified |
 
-* 💡 **工程调优亮点（Z3 NIA 规避策略）**：将账户级可变杠杆重构为系统级编译期常量 `MAX_LEVERAGE_BPS`，使杠杆约束退化为**纯线性整数算术（LIA）**；同时将含真非线性乘积的 `StopLossBounds.dfy` 与运行时网关隔离验证，彻底消除 Z3 非线性启发式搜索超时问题。
+* 💡 **调优->Z3 NIA 规避策略**：将账户级可变杠杆重构为系统级编译期常量 `MAX_LEVERAGE_BPS`，使杠杆约束退化为**纯线性整数算术（LIA）**；同时将含真非线性乘积的 `StopLossBounds.dfy` 与运行时网关隔离验证，彻底消除 Z3 非线性启发式搜索超时问题。
 
 ### 2. Ray 零拷贝分布式回测与比特级确定性
 * **拒绝按时间切片（Anti-Time-Sharding）**：策略具有路径依赖状态，按时间切片会导致跨切片持仓断裂或未来函数泄漏。本引擎严格按**参数空间（Parameter Grid）**与**截面标的**扇出任务（详见 [`distributed/README.md`](distributed/README.md)）。

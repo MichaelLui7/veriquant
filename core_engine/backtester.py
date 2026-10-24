@@ -1,14 +1,4 @@
-"""Deterministic single-task backtest runner.
-
-`run_single_backtest` is the pure function distributed across Ray workers. It
-takes a read-only price array (passed by ObjectRef for zero-copy access), a
-strategy parameter dict, and a risk config, and returns a metrics bundle.
-
-Determinism notes (needed for the single-vs-distributed consistency guarantee):
-  * float64 throughout, no RNG, no per-machine reduction-order dependence;
-  * vectorized numpy operations only;
-  * the equity curve is produced by a plain cumulative product.
-"""
+"""Deterministic single-task backtest runner (Vectorized & Dafny-Verified Event-Driven)."""
 
 from __future__ import annotations
 
@@ -27,21 +17,14 @@ DEFAULT_RISK_CONFIG = {
     "slippage_bps": 1.0,    # verified path only
     "fee_bps": 1.0,         # verified path only
     "limit_pct": 0.0,       # daily price limit (verified path only)
+    "warmup_bars": 0,       # common indicator warm-up window before evaluation
 }
 
 
 def run_single_backtest(prices: np.ndarray, params: dict,
                         risk_config: dict | None = None,
                         include_equity: bool = False) -> dict:
-    """Run one backtest and return a dict of scalar metrics.
-
-    ``params`` must contain ``strategy`` and the strategy's own parameters,
-    e.g. ``{"strategy": "ma_crossover", "fast": 5, "slow": 20}``.
-
-    The full equity curve is only returned when ``include_equity=True``; grid
-    searches only need scalar metrics, and shipping per-task equity arrays back
-    to the driver would dominate the distributed run's cost.
-    """
+    """Run one vectorized backtest and return a dict of scalar metrics."""
     cfg = dict(DEFAULT_RISK_CONFIG)
     if risk_config:
         cfg.update(risk_config)
@@ -49,6 +32,10 @@ def run_single_backtest(prices: np.ndarray, params: dict,
     prices = np.asarray(prices, dtype=np.float64)
     if prices.size < 2:
         raise ValueError("Need at least 2 price observations")
+
+    warmup = int(cfg.get("warmup_bars", 0))
+    if warmup < 0 or warmup >= prices.size - 1:
+        raise ValueError(f"Invalid warmup_bars={warmup} for series of length {prices.size}")
 
     strategy_name = params.get("strategy", "ma_crossover")
     strategy_params = {k: v for k, v in params.items() if k != "strategy"}
@@ -56,36 +43,40 @@ def run_single_backtest(prices: np.ndarray, params: dict,
 
     target = strategy.generate_positions(prices).astype(np.float64)
     target = np.clip(target, 0.0, float(cfg["max_leverage"]))
+    if warmup > 0:
+        target[:warmup] = 0.0
 
-    # Price returns and the position held over each interval (signal at t-1).
     price_returns = np.diff(prices) / prices[:-1]
     held = target[:-1]
 
-    gross = held * price_returns
-    turnover = np.abs(np.diff(target))
+    prev_held = np.concatenate([[0.0], held[:-1]])
+    turnover = np.abs(held - prev_held)
     costs = turnover * (float(cfg["cost_bps"]) / 10000.0)
-    net = gross - costs
+    net = held * price_returns - costs
 
-    equity = float(cfg["initial_capital"]) * np.cumprod(1.0 + net)
+    init_cap = float(cfg["initial_capital"])
+    equity = np.empty(prices.size, dtype=np.float64)
+    equity[0] = init_cap
+    equity[1:] = init_cap * np.cumprod(1.0 + net)
 
-    m = metrics.summarize(equity, net, risk_free=float(cfg["risk_free"]))
-    m["num_trades"] = int(np.count_nonzero(np.diff(target)))
-    m["exposure"] = float(np.mean(target))
+    eval_equity = equity[warmup:]
+    eval_returns = net[warmup:]
+
+    m = metrics.summarize(eval_equity, eval_returns, risk_free=float(cfg["risk_free"]))
+    m["num_trades"] = int(np.count_nonzero(np.diff(target[warmup:])))
+    m["exposure"] = float(np.mean(target[warmup:]))
     result = {"params": params, **m}
     if include_equity:
-        result["equity"] = equity
+        result["equity"] = eval_equity
     return result
 
 
 def run_verified_backtest(prices: np.ndarray, params: dict,
                           risk_config: dict | None = None,
-                          include_equity: bool = False) -> dict:
+                          include_equity: bool = False,
+                          include_events: bool = False) -> dict:
     """Event-driven backtest whose every balance change goes through the
-    Dafny-verified ledger (``risk_control``) and the matching engine.
-
-    This is the runtime wiring: the proven invariants (no overdraft, no short,
-    no leverage breach, funds conserved) are enforced by the same code that is
-    formally verified — not a parallel re-implementation.
+    Dafny-verified ledger (``risk_control``) and emits a SHA-256 state hash.
     """
     cfg = dict(DEFAULT_RISK_CONFIG)
     if risk_config:
@@ -95,22 +86,36 @@ def run_verified_backtest(prices: np.ndarray, params: dict,
     if prices.size < 2:
         raise ValueError("Need at least 2 price observations")
 
+    warmup = int(cfg.get("warmup_bars", 0))
+    if warmup < 0 or warmup >= prices.size - 1:
+        raise ValueError(f"Invalid warmup_bars={warmup} for series of length {prices.size}")
+
     strategy_name = params.get("strategy", "ma_crossover")
     strategy_params = {k: v for k, v in params.items() if k != "strategy"}
     strategy = get_strategy(strategy_name)(**strategy_params)
 
     signals = strategy.generate_positions(prices).astype(np.float64)
+    signals = np.clip(signals, 0.0, float(cfg["max_leverage"]))
+    if warmup > 0:
+        signals[:warmup] = 0.0
 
     matching = MatchingConfig(
         slippage_bps=float(cfg["slippage_bps"]),
         fee_bps=float(cfg["fee_bps"]),
         limit_pct=float(cfg["limit_pct"]),
     )
-    portfolio = VerifiedPortfolio(cash=float(cfg["initial_capital"]), matching=matching)
+    portfolio = VerifiedPortfolio(
+        cash=float(cfg["initial_capital"]),
+        matching=matching,
+        max_leverage=float(cfg["max_leverage"]),
+        record_events=include_events,
+    )
 
     n = prices.shape[0]
     equity = np.empty(n, dtype=np.float64)
+    actual_exposure = np.zeros(n, dtype=np.float64)
     prev_signal = 0.0
+
     for t in range(n):
         if t > 0:
             portfolio.mark_to_market(prices[t], prices[t - 1])
@@ -120,16 +125,25 @@ def run_verified_backtest(prices: np.ndarray, params: dict,
                 signal * portfolio.equity,
                 prev_price=prices[t - 1] if t > 0 else None,
                 price=prices[t],
+                bar=t,
             )
         prev_signal = signal
-        equity[t] = portfolio.equity
+        eq = portfolio.equity
+        equity[t] = eq
+        actual_exposure[t] = portfolio.account.position_value / eq if eq > 0 else 0.0
+        portfolio.update_state_hash(t)
 
-    returns = np.diff(equity) / equity[:-1]
-    m = metrics.summarize(equity, returns, risk_free=float(cfg["risk_free"]))
-    m["num_trades"] = int(np.count_nonzero(np.diff(signals)))
-    m["exposure"] = float(np.mean(signals))
+    eval_equity = equity[warmup:]
+    returns = np.diff(eval_equity) / eval_equity[:-1]
+    m = metrics.summarize(eval_equity, returns, risk_free=float(cfg["risk_free"]))
+    m["num_trades"] = portfolio.executed_trades
+    m["exposure"] = float(np.mean(actual_exposure[warmup:]))
     m["rejections"] = portfolio.rejections
+    m["final_state_hash"] = portfolio.state_hash
+
     result = {"params": params, **m}
     if include_equity:
-        result["equity"] = equity
+        result["equity"] = eval_equity
+    if include_events:
+        result["events"] = portfolio.events
     return result

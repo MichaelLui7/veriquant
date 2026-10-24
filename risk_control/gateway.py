@@ -77,8 +77,18 @@ class VerifiedLedger:
     position, no leverage breach, no funds created/destroyed.
     """
 
-    def __init__(self, cash: float = 0.0, position_value: float = 0.0) -> None:
-        self._account = Account(cash=cash, locked_cash=0.0, position_value=position_value)
+    def __init__(self, cash: float = 0.0, position_value: float = 0.0,
+                 max_leverage: float = 2.0) -> None:
+        if max_leverage <= 0.0 or max_leverage > 2.0:
+            raise ValueError(
+                f"max_leverage={max_leverage} exceeds Dafny-verified bounds (0.0, 2.0]"
+            )
+        self._max_leverage_bps: int = to_fixed(max_leverage)
+        self._account = Account(
+            cash=to_float(to_fixed(cash)),
+            locked_cash=0.0,
+            position_value=to_float(to_fixed(position_value)),
+        )
 
     @property
     def account(self) -> Account:
@@ -88,14 +98,29 @@ class VerifiedLedger:
     def equity(self) -> float:
         return self._account.equity
 
+    @property
+    def max_leverage(self) -> float:
+        return to_float(self._max_leverage_bps)
+
+    def restore(self, snapshot: Account) -> None:
+        """Atomically restore an immutable Account snapshot on transaction abort."""
+        self._account = snapshot
+
+    def within_user_leverage(self, candidate: "Types.AccountState | None" = None) -> bool:
+        acc = candidate if candidate is not None else self._account.to_dafny()
+        exposure = acc.positionValue + acc.lockedCash
+        equity = acc.cash + acc.lockedCash + acc.positionValue
+        return exposure * SCALE <= equity * self._max_leverage_bps
+
     # --- verified primitives -------------------------------------------------
 
     def try_lock(self, notional: float) -> bool:
-        """Freeze cash for a new order (enforces cash sufficiency + leverage)."""
+        """Freeze cash for a new order (enforces cash sufficiency + user/Dafny leverage)."""
         ok, acc = _accounts.TryLockOrderCash(self._account.to_dafny(), to_fixed(notional))
-        if ok:
+        if ok and self.within_user_leverage(acc):
             self._account = Account.from_dafny(acc)
-        return ok
+            return True
+        return False
 
     def release(self, amount: float) -> bool:
         ok, acc = _accounts.ReleaseLockedCash(self._account.to_dafny(), to_fixed(amount))
@@ -123,47 +148,47 @@ class VerifiedLedger:
     def pay_cost(self, cost: float) -> bool:
         """Pay a fee/slippage cost out of cash (never overdraws or over-levers)."""
         ok, acc = _accounts.PayCost(self._account.to_dafny(), to_fixed(cost))
-        if ok:
+        if ok and self.within_user_leverage(acc):
             self._account = Account.from_dafny(acc)
-        return ok
+            return True
+        return False
 
     def mark_to_market(self, price: float, prev_price: float) -> None:
-        """External price move: rescale position value by the price ratio.
-
-        This is *not* a verified transition — it models the market moving the
-        holdings' value between decisions; the verified primitives then operate
-        on the revalued account.
-        """
+        """External price move: rescale position value by the price ratio."""
         a = self._account
         if prev_price > 0.0:
+            revalued = to_float(to_fixed(a.position_value * price / prev_price))
             self._account = Account(
                 cash=a.cash,
                 locked_cash=a.locked_cash,
-                position_value=a.position_value * price / prev_price,
+                position_value=revalued,
             )
 
 
 class RiskGateway:
     """Thin wrapper over the Dafny-verified pre-trade gateway."""
 
-    def __init__(self, account: Account) -> None:
+    def __init__(self, account: Account, max_leverage: float = 2.0) -> None:
+        if max_leverage <= 0.0 or max_leverage > 2.0:
+            raise ValueError(
+                f"max_leverage={max_leverage} exceeds Dafny-verified bounds (0.0, 2.0]"
+            )
         self._account = account
+        self._max_leverage_bps: int = to_fixed(max_leverage)
 
     @property
     def account(self) -> Account:
         return self._account
 
     def pre_trade_check(self, order_notional: float) -> tuple[bool, Account]:
-        """Return (approved, resulting_account).
-
-        Approved orders freeze their notional; rejected orders leave the
-        account untouched. The decision and the transition are guaranteed by
-        the Dafny proofs (no overdraft, no leverage breach, funds conserved).
-        """
+        """Return (approved, resulting_account)."""
         approved, new_acc = _verified.PreTradeGateway(
             self._account.to_dafny(), to_fixed(order_notional)
         )
-        result = Account.from_dafny(new_acc)
-        if approved:
+        exposure = new_acc.positionValue + new_acc.lockedCash
+        equity = new_acc.cash + new_acc.lockedCash + new_acc.positionValue
+        if approved and (exposure * SCALE <= equity * self._max_leverage_bps):
+            result = Account.from_dafny(new_acc)
             self._account = result
-        return approved, result
+            return True, result
+        return False, self._account

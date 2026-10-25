@@ -50,12 +50,12 @@ result["rejections"]   # Number of orders rejected by the Dafny-verified gateway
 
 The code in `dafny_verification/src/` formally proves **45 verification conditions (VCs)** using **fixed-point arithmetic (`SCALE = 10,000`)**, avoiding precision drift associated with IEEE-754 floating-point arithmetic. For details, see [`dafny_verification/README.md`](dafny_verification/README.md) and [`docs/formal_verification_spec.md`](docs/formal_verification_spec.md).
 
-| Module | Core Mathematical Theorems and Invariants | VCs | Status |
-| :----- | :--------------------------------------- | :-: | :----: |
-| `AccountInvariants.dfy` | **Cash-conservation theorems** (`TotalCash` / `NetEquity`), **no-overdraft invariant**, and **2.0× leverage-limit invariant** | 2 | ✅ Verified |
-| `OrderStateMachine.dfy` | **Forward-only order lifecycle**, **net-equity conservation under partial fills**, **exact release of reserved funds upon cancellation**, and **protection against double spending after terminal states** | 3 | ✅ Verified |
-| `StopLossBounds.dfy` | **Bounded-slippage stop-loss theorem**: a strict upper bound on long-position stop-loss exposure under the explicit precondition `\|ΔPrice\| ≤ MaxGap` | 2 | ✅ Verified |
-| `RiskGateway.dfy` | **Atomic pre-trade risk gateway (`PreTradeGateway`)**, end-to-end conservation across the complete order lifecycle, and `{:test}` assertions | 38 | ✅ Verified |
+| Module                  | Core Mathematical Theorems and Invariants                                                                                                                                                                  |  VCs  |   Status   |
+| :---------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---: | :--------: |
+| `AccountInvariants.dfy` | **Cash-conservation theorems** (`TotalCash` / `NetEquity`), **no-overdraft invariant**, and **2.0× leverage-limit invariant**                                                                              |   2   | ✅ Verified |
+| `OrderStateMachine.dfy` | **Forward-only order lifecycle**, **net-equity conservation under partial fills**, **exact release of reserved funds upon cancellation**, and **protection against double spending after terminal states** |   3   | ✅ Verified |
+| `StopLossBounds.dfy`    | **Bounded-slippage stop-loss theorem**: a strict upper bound on long-position stop-loss exposure under the explicit precondition `\|ΔPrice\| ≤ MaxGap`                                                     |   2   | ✅ Verified |
+| `RiskGateway.dfy`       | **Atomic pre-trade risk gateway (`PreTradeGateway`)**, end-to-end conservation across the complete order lifecycle, and `{:test}` assertions                                                               |  38   | ✅ Verified |
 
 * 💡 **Optimization: Avoiding Z3 Nonlinear Integer Arithmetic (NIA) Timeouts.** The account-level variable leverage constraint was refactored into a system-level compile-time constant, `MAX_LEVERAGE_BPS`, reducing the leverage constraint to **linear integer arithmetic (LIA)**. `StopLossBounds.dfy`, which includes genuinely nonlinear products, is verified separately from the runtime gateway, eliminating timeouts caused by Z3's heuristic search for nonlinear arithmetic proofs.
 
@@ -162,4 +162,11 @@ python tests/benchmark_ray.py
 # and the Dafny pre-trade risk gateway check
 veriquant agent "Backtest the past 3 years with an MA crossover strategy, targeting a Sharpe ratio above 1.2"
 veriquant verify-gate --cash 100000 --notional 300000
+
 ```
+---
+## 📚 Architecture Evolution & Post-Mortem
+
+For an in-depth look at the key challenges encountered during the project's development, as well as a review of vulnerability fixes—complete with "before vs. after" code comparisons—please refer to the following post-mortem documentation:
+* 🌐 **English Version**: [Engineering Evolution & Post-Mortem](docs/engineering_evolution.md)
+* 🇨🇳 **Simplified Chinese Version**: [架构演进与审计复盘录](docs/engineering_evolution.zh-CN.md)

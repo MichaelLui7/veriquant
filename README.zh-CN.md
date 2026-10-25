@@ -149,3 +149,10 @@ python tests/benchmark_ray.py
 veriquant agent "用MA交叉策略回测过去3年数据，夏普比率目标1.2以上"
 veriquant verify-gate --cash 100000 --notional 300000
 ```
+---
+
+## 📚 架构演进与审计复盘文档 (Architecture Evolution & Post-Mortem)
+
+想深入了解本项目在开发过程中遇到的核心挫折、审阅漏洞修复与前后代码对比（Before vs. After），请查阅以下深度复盘录：
+* 🌐 **English Version**: [Engineering Evolution & Post-Mortem](docs/engineering_evolution.md)
+* 🇨🇳 **简体中文版**: [架构演进与审计复盘录](docs/engineering_evolution.zh-CN.md)
